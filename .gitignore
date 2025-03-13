@@ -1,9 +1,45 @@
+# Python bytecode and cache files
+.venv
+test.db
+
+
 __pycache__/
-.env
-db.sqlite3
 *.pyc
 *.pyo
 *.pyd
+*.cache
+
+# Virtual environment
 venv/
+.env
+.env.local
+
+# Logs and debug files
+logs/
+*.log
+
+# Database files
+*.sqlite3
+*.db
+/migrations/
+
+# Pytest and testing
+htmlcov/
+.coverage
+.tox/
+nosetests.xml
+coverage.xml
+
+# Ignore editor/IDE files
+.vscode/
 .idea/
-.DS_Store
+*.swp
+*.swo
+
+# Docker files
+docker-compose.override.yml
+
+# Ignore compiled Python packages
+dist/
+build/
+*.egg-info/
