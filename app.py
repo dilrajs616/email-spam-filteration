@@ -2,6 +2,8 @@ from flask import Flask
 
 app = Flask(__name__)
 
+from routes import check_email
+
 @app.route('/')
 def landing_page():
     return "hello, World!"

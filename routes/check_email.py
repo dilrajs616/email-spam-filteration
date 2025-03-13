@@ -3,13 +3,13 @@ import email
 import spf
 import dkim
 import re
-from authheaders import validate_headers
+import dmarc
 
 from app import app
 
 @app.route("/spam-test", methods=["POST"])
 def spam_test():
-    data = request.form.get('email')  # Assuming raw email string is sent
+    data = request.form.get('email') 
     if not data:
         return jsonify({"error": "No email data provided"}), 400
 
@@ -43,9 +43,10 @@ def spam_test():
 
     # DMARC Check
     try:
-        dmarc_result = validate_headers(data.encode(), validators=['dmarc'])
-        results["DMARC"] = "pass" if dmarc_result.dmarc else "fail"
-    except:
-        results["DMARC"] = "error"
+        dmarc_result = dmarc.check_uri(domain)
+        results["DMARC"] = "pass" if dmarc_result else "fail"
+    except Exception as e:
+        results["DMARC"] = f"error: {str(e)}"
+
 
     return jsonify(results)
