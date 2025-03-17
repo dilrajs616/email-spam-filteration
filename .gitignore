@@ -1,6 +1,8 @@
 # Python bytecode and cache files
 .venv
 test.db
+*cache*
+data
 
 
 __pycache__/
