@@ -1,36 +1,59 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Request
+from app.api.routes.check_email_headers import check_spf, check_dkim
 import email
-from app.api.routes.check_email_headers import check_spf, check_dkim, check_dmarc
-
-class EmailRequest(BaseModel):
-    raw_email: str
+from email import policy
+from email.utils import parseaddr
+import re
 
 router = APIRouter()
 
-@router.get("/")
-async def get_emails():
-    return {"message": "List of emails"}
+# Define spam threshold
+SPAM_THRESHOLD = -5
 
+@router.post("/check_email", response_model=dict)
+async def process_email(request: Request):
+    try:
+        raw_email = await request.body()
+        raw_email = raw_email.decode("utf-8", errors="ignore")
+        parsed_email = email.message_from_string(raw_email, policy=policy.default)
+        
+        # Extract headers
+        headers = dict(parsed_email.items())
+        # Extract relevant SPF, DKIM, and DMARC fields
+        mail_from = headers.get("Return-Path", "").strip("<>")  # Strip angle brackets
+        received_spf = headers.get("Received-SPF", "")
+        # Extract sender domain
+        from_email = headers.get("From", "")
+        _, sender_email = parseaddr(from_email)
+        sender_domain = sender_email.split("@")[-1] if "@" in sender_email else ""
 
-@router.post("/check_email")
-def check_email(email_request: EmailRequest):
-    raw_email = email_request.raw_email
-    msg = email.message_from_string(raw_email)
+        # Run SPF check
+        spf_pass = False
+        ip_match = re.search(r"client-ip=([\d\.]+)", received_spf)
+        if ip_match:
+            client_ip = ip_match.group(1)
+            spf_pass = check_spf(mail_from, client_ip, sender_domain)
+        
+        # Scoring system
+        score = 0
+        description = []
 
-    mailfrom = msg.get("Return-Path", "").strip("<>")
-    helo = msg.get("Received", "").split()[-1] if "Received" in msg else "unknown"
-    ip = "127.0.0.1"  # Placeholder (Extract actual sending IP from headers)
-    domain = mailfrom.split('@')[-1] if '@' in mailfrom else None
+        if not spf_pass:
+            return {"spam": "spam", "score": score, "description": ["spf failed"]}  # Directly mark as spam if SPF fails
+        
+        dkim_pass = check_dkim(raw_email)
 
-    if not domain:
-        return {"status": "spam", "reason": "Missing sender domain"}
+        if not dkim_pass:
+            score -= 1
+            description.append("dkim failed")
 
-    spf_pass = check_spf(mailfrom, ip, helo)
-    dkim_pass = check_dkim(raw_email)
-    dmarc_pass = check_dmarc(domain)
+        is_spam = "spam" if score < SPAM_THRESHOLD else "ham"
 
-    if not (spf_pass and dkim_pass and dmarc_pass):
-        return {"status": "spam", "reason": "Failed SPF, DKIM, or DMARC"}
+        return {
+            "spam": is_spam,
+            "score": score,
+            "description": description
+        }
 
-    return {"status": "ham", "reason": "Passed authentication"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error processing email: {str(e)}")
