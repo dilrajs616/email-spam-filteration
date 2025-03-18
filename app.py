@@ -1,55 +1,54 @@
-from fastapi import FastAPI, Request
-import spf
-import email
-from email import policy
-from email.parser import BytesParser
-import re
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from email import message_from_string
+from scripts.extract_body import check_email_body
+from scripts.check_headers import check_headers
+from scripts.similar_domain import check_matching_domains
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+safebrowsing_api_key = os.getenv("SAFEBROWSING_API_KEY")
 
 app = FastAPI()
 
-def extract_sender_ip(headers: dict) -> str:
-    """Extracts sender IP from the last 'Received' header."""
-    received_headers = headers.get_all('Received', [])
-    if received_headers:
-        for header in headers[::-1]:  # Reverse iteration to get the last "from" header first
-            match = re.search(r'from .* \[(\d+\.\d+\.\d+\.\d+)\]', header)
-            if match:
-                client_ip = match.group(1)
-                return client_ip
-    return None
+# Define the request model
+class EmailRequest(BaseModel):
+    raw_email: str
+    helo_domain: str
+    sender_ip: str
+    sender_domain: str
+    return_path: str
 
-def extract_return_path(headers: dict) -> str:
-    """Extracts the Return-Path domain."""
-    return_path = headers.get('Return-Path', '').strip('<>')
-    if return_path:
-        domain = return_path.split('@')[-1]
-        return domain if domain else None
-    return None
-
-@app.post("/check-email")
-async def process_email(request: Request):
+@app.post("/analyze-email/")
+async def analyze_email(request: EmailRequest):
     try:
-        raw_email = await request.body()
-        parsed_email = BytesParser(policy=policy.default).parsebytes(raw_email)
-        headers = parsed_email
-        
-        sender_ip = extract_sender_ip(headers)
-        return_path_domain = extract_return_path(headers)
-        
-        print(f'return patth: {return_path_domain}, sender_ip: {sender_ip}')
+        # Parse the raw email
+        email_msg = message_from_string(request.raw_email)
+        # Initialize spam score and description list
+        spam_score = 0
+        description = []
 
-        if not sender_ip or not return_path_domain:
-            return {"error": "Missing required headers (Received or Return-Path)"}
-        
-        # Perform SPF check
-        spf_result, explanation = spf.check2(sender_ip, return_path_domain, return_path_domain)
-        
+
+        # Check SPF, DKIM, DMARC, RBL and safebrowsing check
+        score, header_description = check_headers(email_msg, request.helo_domain, request.sender_ip, request.return_path, safebrowsing_api_key)
+        spam_score += score
+        description.extend(header_description)
+
+        # Extract email body
+        body_text, score = check_email_body(email_msg, description)
+        spam_score += score
+
+        # Check for similar domains
+        domain_similarity_score, domain_description = check_matching_domains(request.sender_domain, email_msg, description)
+        spam_score += domain_similarity_score
+        description.extend(domain_description)
+
         return {
-            "sender_ip": sender_ip,
-            "return_path_domain": return_path_domain,
-            "spf_result": spf_result,
-            "explanation": explanation
+            "spam_score": spam_score,
+            "description": description,
         }
+
     except Exception as e:
-        print(f"error: {str(e)}")
-        return {"error": str(e)}
+        raise HTTPException(status_code=400, detail=f"Error parsing email: {str(e)}")
