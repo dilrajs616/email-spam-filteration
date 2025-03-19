@@ -1,17 +1,27 @@
 import re
 from difflib import SequenceMatcher
+import config
 
-def check_matching_domains(sender_domain: str, email_msg: str, description: list, threshold: float = 0.8) -> bool:
+def check_matching_domains(sender_domain: str, email_msg: dict, description: list, threshold: float = 0.8) -> int:
     """
-    Check if the sender and receiver domains are similar based on string similarity.
-    :return: True if domains are similar, False otherwise
+    Check if the sender and receiver domains are similar but not identical based on string similarity.
+    :return: Spam score
     """
-    recipient_email = email_msg["Delivered-To"] or email_msg["To"]
+    recipient_email = email_msg.get("Delivered-To") or email_msg.get("To")
+
     if recipient_email:
+        # Extract the first recipient if multiple are present
+        recipient_email = recipient_email.split(",")[0].strip()
+        
         match = re.search(r'@([\w.-]+)', recipient_email)
-        receiver_domain = match.group(1) 
-    similarity = SequenceMatcher(None, sender_domain, receiver_domain).ratio()
-    if similarity >= threshold:
-        description.append("sender domain matching with receiver domain")
-        return +5
+        if match:
+            receiver_domain = match.group(1)
 
+            # Compute domain similarity
+            similarity = SequenceMatcher(None, sender_domain, receiver_domain).ratio()
+
+            if threshold < similarity < 1.0: 
+                description.append(f"Sender domain '{sender_domain}' is suspiciously similar to recipient domain '{receiver_domain}'.")
+                return config.DOMAIN_SIMILARITY_SCORE 
+
+    return config.DOMAIN_NON_SIMILARITY_SCORE  

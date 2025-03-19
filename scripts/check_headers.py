@@ -6,93 +6,105 @@ import dkim
 import requests
 from email import message_from_string
 from dns.resolver import resolve, NXDOMAIN, NoAnswer, Timeout
+import config
+
 
 def extract_urls_from_email(email_msg):
     urls = set()  # Use a set to avoid duplicates
-    
-    # Extract URLs from plain text
-    text_content = email_msg.get_payload(decode=True).decode(errors="ignore")
-    urls.update(re.findall(r'https?://\S+', text_content))
 
-    # Extract URLs from HTML (if available)
-    if email_msg.get_content_type() == "text/html":
-        soup = BeautifulSoup(text_content, "html.parser")
-        for link in soup.find_all("a", href=True):
-            urls.add(link["href"])
-    
+    # Handle multipart emails
+    if email_msg.is_multipart():
+        for part in email_msg.walk():
+            content_type = part.get_content_type()
+            try:
+                text_content = part.get_payload(decode=True).decode(errors="ignore")
+                urls.update(re.findall(r'https?://\S+', text_content))
+                if content_type == "text/html":
+                    soup = BeautifulSoup(text_content, "html.parser")
+                    urls.update(link["href"] for link in soup.find_all("a", href=True))
+            except Exception:
+                continue  # Ignore decoding errors
+    else:
+        # Single-part email
+        text_content = email_msg.get_payload(decode=True).decode(errors="ignore")
+        urls.update(re.findall(r'https?://\S+', text_content))
+
     return list(urls)
+
 
 def check_spf(headers, sender_ip, helo_domain, return_path, description):
     """Check SPF record validation and assign score"""
     try:
-        spf_result = spf.check2(sender_ip, helo_domain, return_path)
-        if spf_result[0] == 'pass':
-            return 0
+        spf_result, explanation = spf.query(sender_ip, helo_domain, return_path)[:2]
+        if spf_result == "pass":
+            return config.SPF_PASS_SCORE
         else:
-            description.append(f"SPF failed: {spf_result[0]}")
-            return 5
+            description.append(f"SPF failed: {spf_result} - {explanation}")
+            return config.SPF_FAIL_SCORE
     except Exception as e:
         description.append(f"SPF check error: {str(e)}")
-        return 5
+        return config.SPF_FAIL_SCORE
 
-def check_dkim(headers, description):
+
+def check_dkim(raw_email, description):
     """Check DKIM signature validation and assign score"""
     try:
-        dkim_signature = headers.get("DKIM-Signature")
-        if dkim_signature:
-            raw_email = "\r\n".join(f"{k}: {v}" for k, v in headers.items())
-            if dkim.verify(raw_email.encode()):
-                return 0
+        if dkim.verify(raw_email.encode()):  # Verify DKIM using the full email
+            return config.DKIM_PASS_SCORE
         description.append("DKIM failed or missing")
-        return 5
+        return config.DKIM_FAIL_SCORE
     except Exception as e:
         description.append(f"DKIM check error: {str(e)}")
-        return 5
+        return config.DKIM_FAIL_SCORE
 
-def check_dmarc(headers, return_path, description):
+
+def check_dmarc(return_path, description):
     """Check DMARC policy compliance and assign score"""
     try:
         domain = return_path.split('@')[-1]
         dmarc_record = f"_dmarc.{domain}"
-        answers = dns.resolver.resolve(dmarc_record, 'TXT')
+        answers = dns.resolver.resolve(dmarc_record, "TXT")
         for rdata in answers:
             if "p=reject" in str(rdata) or "p=quarantine" in str(rdata):
-                return 0
+                return config.DMARC_PASS_SCORE
         description.append("DMARC failed or missing")
-        return 5
+        return config.DMARC_FAIL_SCORE  # Fixed typo
     except (NXDOMAIN, NoAnswer, Timeout):
         description.append("DMARC record not found")
-        return 5
+        return config.DMARC_FAIL_SCORE  # Fixed typo
     except Exception as e:
         description.append(f"DMARC check error: {str(e)}")
-        return 5
+        return config.DMARC_FAIL_SCORE  # Fixed typo
 
-def check_rbl(sender_domain, description):
-    """Check if sender domain is listed in RBL and assign score"""
+
+def check_rbl(sender_ip, description):
+    """Check if sender IP is listed in RBL and assign score"""
     blacklists = [
         "zen.spamhaus.org",
         "b.barracudacentral.org",
         "bl.spamcop.net",
         "blacklist.woody.ch"
     ]
+    
     try:
+        # Convert IP into RBL query format (reverse octets)
+        reversed_ip = ".".join(sender_ip.split(".")[::-1])
         for bl in blacklists:
-            query = f"{sender_domain}.{bl}"
+            query = f"{reversed_ip}.{bl}"
             dns.resolver.resolve(query, "A")
-            description.append(f"Sender domain is blacklisted in {bl}")
-            return 10
+            description.append(f"Sender IP {sender_ip} is blacklisted in {bl}")
+            return config.RBL_FAIL_SCORE
     except (NXDOMAIN, NoAnswer, Timeout):
-        pass
-    return 0
+        pass  # IP is not blacklisted
+    
+    return config.RBL_PASS_SCORE
 
-def check_urls_with_safebrowsing(urls, api_key, description):
+
+def check_urls_with_safebrowsing(urls, description):
     """Check URLs against Google Safe Browsing API."""
-    safe_browsing_url = "https://safebrowsing.googleapis.com/v4/threatMatches:find?key=" + api_key
+    safe_browsing_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={config.SAFEBROWSING_API_KEY}"
     body = {
-        "client": {
-            "clientId": "your-client-id",
-            "clientVersion": "1.0"
-        },
+        "client": {"clientId": "your-client-id", "clientVersion": "1.0"},
         "threatInfo": {
             "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"],
             "platformTypes": ["ANY_PLATFORM"],
@@ -100,29 +112,35 @@ def check_urls_with_safebrowsing(urls, api_key, description):
             "threatEntries": [{"url": url} for url in urls]
         }
     }
-    response = requests.post(safe_browsing_url, json=body)
-    if response.status_code == 200 and response.json():
-        description.append("Unsafe URLs detected by Google Safe Browsing API")
-        return 10
-    return 0
+    
+    try:
+        response = requests.post(safe_browsing_url, json=body)
+        response_data = response.json()
+        if response.status_code == 200 and "matches" in response_data:
+            description.append("Unsafe URLs detected by Google Safe Browsing API")
+            return config.SAFEBROWSING_FAIL_SCORE
+    except Exception as e:
+        description.append(f"Safe Browsing check error: {str(e)}")
+    
+    return config.SAFEBROWSING_PASS_SCORE
 
 
 
-def check_headers(raw_email, helo_domain, sender_ip, return_path, safebrowsing_api_key):
-    '''Check SPF, DKIM, DMARC, RBL, and scan URLs & attachments'''
+
+def check_headers(raw_email, helo_domain, sender_ip, return_path, description):
+    """Check SPF, DKIM, DMARC, RBL, and scan URLs"""
     email_msg = message_from_string(raw_email)
     headers = {key: value for key, value in email_msg.items()}
-    description = []
-    urls = extract_urls_from_email(raw_email)
+    urls = extract_urls_from_email(email_msg)
     
     # Initialize score
     score = 0
-    
+
     # Run individual checks
     score += check_spf(headers, sender_ip, helo_domain, return_path, description)
-    score += check_dkim(headers, description)
-    score += check_dmarc(headers, return_path, description)
-    score += check_rbl(return_path.split('@')[-1], description)
-    score += check_urls_with_safebrowsing(urls, safebrowsing_api_key, description)
-    
-    return {"score": score, "description": description}
+    score += check_dkim(raw_email, description) 
+    score += check_dmarc(return_path, description)
+    score += check_rbl(sender_ip, description) 
+    score += check_urls_with_safebrowsing(urls, description)
+
+    return score
