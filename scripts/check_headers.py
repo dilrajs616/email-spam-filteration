@@ -1,35 +1,9 @@
-import re
-from bs4 import BeautifulSoup
 import spf
 import dns.resolver
 import dkim
-import requests
 from email import message_from_string
 from dns.resolver import resolve, NXDOMAIN, NoAnswer, Timeout
 import config
-
-
-def extract_urls_from_email(email_msg):
-    urls = set()  # Use a set to avoid duplicates
-
-    # Handle multipart emails
-    if email_msg.is_multipart():
-        for part in email_msg.walk():
-            content_type = part.get_content_type()
-            try:
-                text_content = part.get_payload(decode=True).decode(errors="ignore")
-                urls.update(re.findall(r'https?://\S+', text_content))
-                if content_type == "text/html":
-                    soup = BeautifulSoup(text_content, "html.parser")
-                    urls.update(link["href"] for link in soup.find_all("a", href=True))
-            except Exception:
-                continue  # Ignore decoding errors
-    else:
-        # Single-part email
-        text_content = email_msg.get_payload(decode=True).decode(errors="ignore")
-        urls.update(re.findall(r'https?://\S+', text_content))
-
-    return list(urls)
 
 
 def check_spf(headers, sender_ip, helo_domain, return_path, description):
@@ -100,38 +74,11 @@ def check_rbl(sender_ip, description):
     return config.RBL_PASS_SCORE
 
 
-def check_urls_with_safebrowsing(urls, description):
-    """Check URLs against Google Safe Browsing API."""
-    safe_browsing_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={config.SAFEBROWSING_API_KEY}"
-    body = {
-        "client": {"clientId": "your-client-id", "clientVersion": "1.0"},
-        "threatInfo": {
-            "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"],
-            "platformTypes": ["ANY_PLATFORM"],
-            "threatEntryTypes": ["URL"],
-            "threatEntries": [{"url": url} for url in urls]
-        }
-    }
-    
-    try:
-        response = requests.post(safe_browsing_url, json=body)
-        response_data = response.json()
-        if response.status_code == 200 and "matches" in response_data:
-            description.append("Unsafe URLs detected by Google Safe Browsing API")
-            return config.SAFEBROWSING_FAIL_SCORE
-    except Exception as e:
-        description.append(f"Safe Browsing check error: {str(e)}")
-    
-    return config.SAFEBROWSING_PASS_SCORE
-
-
-
 
 def check_headers(raw_email, helo_domain, sender_ip, return_path, description):
     """Check SPF, DKIM, DMARC, RBL, and scan URLs"""
     email_msg = message_from_string(raw_email)
     headers = {key: value for key, value in email_msg.items()}
-    urls = extract_urls_from_email(email_msg)
     
     # Initialize score
     score = 0
@@ -141,6 +88,5 @@ def check_headers(raw_email, helo_domain, sender_ip, return_path, description):
     score += check_dkim(raw_email, description) 
     score += check_dmarc(return_path, description)
     score += check_rbl(sender_ip, description) 
-    score += check_urls_with_safebrowsing(urls, description)
 
     return score
